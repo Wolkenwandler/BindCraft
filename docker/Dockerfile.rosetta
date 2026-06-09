@@ -13,12 +13,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates procps \
     && rm -rf /var/lib/apt/lists/*
 
-# CPU-only deps needed by pyrosetta_utils / biopython_utils / generic_utils. No jax/colabdesign.
+# CPU-only deps needed by functions/__init__.py + pyrosetta_utils / biopython_utils / generic_utils.
+# matplotlib-base is required because functions/__init__.py imports matplotlib.pyplot at top level
+# (headless Agg backend is enough; -base avoids GUI toolkits). No jax/colabdesign.
 # python=3.10 is REQUIRED: PyRosetta wheels are CPython-version-specific (cp310) and the
 # rossettacommons find-links only serves 3.10 — an unpinned newer Python breaks the pip install
 # (matches install_bindcraft.sh which creates the env with python=3.10).
 RUN micromamba install -y -n base -c conda-forge \
-        python=3.10 pip pandas 'numpy<2.0.0' scipy biopython libgfortran5 \
+        python=3.10 pip pandas 'numpy<2.0.0' scipy biopython libgfortran5 matplotlib-base \
     && micromamba clean -a -y
 
 ARG MAMBA_DOCKERFILE_ACTIVATE=1
