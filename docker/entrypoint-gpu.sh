@@ -1,30 +1,18 @@
 #!/bin/bash
 # entrypoint-gpu.sh
 # Runs inside the activated micromamba "base" env (via micromamba's _entrypoint.sh).
-# 1) Ensures AlphaFold2 weights exist on the mounted params volume.
-# 2) Waits for the Rosetta service to be reachable (relax/score run there).
-# 3) Execs the given CMD (worker.py by default).
+# AF2 weights are baked into the image at /app/params (see Dockerfile.gpu), so there is
+# no runtime download. This entrypoint just sanity-checks the weights, waits for the
+# Rosetta service, then execs the given CMD (worker.py by default).
 set -euo pipefail
 
 PARAMS_DIR="${PARAMS_DIR:-/app/params}"
-PARAMS_URL="${PARAMS_URL:-https://storage.googleapis.com/alphafold/alphafold_params_2022-12-06.tar}"
-PARAMS_MARKER="${PARAMS_DIR}/params_model_5_ptm.npz"
-
-mkdir -p "${PARAMS_DIR}"
-
-if [ -f "${PARAMS_MARKER}" ]; then
-  echo "[entrypoint] AlphaFold2 weights already present at ${PARAMS_DIR}"
-else
-  echo "[entrypoint] AlphaFold2 weights missing -> downloading (~5.3 GB) to ${PARAMS_DIR}"
-  TAR="${PARAMS_DIR}/alphafold_params_2022-12-06.tar"
-  wget -q --show-progress -O "${TAR}" "${PARAMS_URL}"
-  [ -s "${TAR}" ] || { echo "[entrypoint] ERROR: download produced empty file"; exit 1; }
-  tar tf "${TAR}" >/dev/null 2>&1 || { echo "[entrypoint] ERROR: corrupt weights archive"; exit 1; }
-  tar -xf "${TAR}" -C "${PARAMS_DIR}"
-  [ -f "${PARAMS_MARKER}" ] || { echo "[entrypoint] ERROR: weights not found after extraction"; exit 1; }
-  rm -f "${TAR}"
-  echo "[entrypoint] AlphaFold2 weights ready"
+if [ ! -f "${PARAMS_DIR}/params_model_5_ptm.npz" ]; then
+  echo "[entrypoint] ERROR: AF2 weights not found in ${PARAMS_DIR}. They should be baked into"
+  echo "             the image at build time; rebuild docker/Dockerfile.gpu."
+  exit 1
 fi
+echo "[entrypoint] AF2 weights present at ${PARAMS_DIR}"
 
 # Wait for the Rosetta service (functions/rosetta_client also retries, but fail fast here
 # with a clear message if it never comes up).

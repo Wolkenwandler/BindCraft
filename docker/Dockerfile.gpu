@@ -4,8 +4,8 @@
 # Runs the design loop (bindcraft.py) in BINDCRAFT_MODE=gpu, forwarding all
 # Rosetta calls (relax/score/align/rmsd) over HTTP to the bindcraft-rosetta service.
 #
-# AF2 weights (~5.3 GB) are downloaded at runtime onto the mounted `params` volume.
-# Build needs no GPU; running needs a GPU + nvidia-container-toolkit on the host.
+# AF2 weights (~5.3 GB) are baked into the image at build time (see below).
+# Build needs no GPU but DOES need network; running needs a GPU + nvidia-container-toolkit.
 ###############################################################################
 FROM mambaorg/micromamba:1.5-jammy
 
@@ -17,9 +17,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # conda packages (install_bindcraft.sh:66-78), CUDA-enabled jaxlib. No PyRosetta here.
+# python=3.10 is REQUIRED (matches install_bindcraft.sh): the pinned jax/jaxlib<=0.6.0 cuda
+# builds and ColabDesign were validated on 3.10; an unpinned newer Python can break the solve.
 RUN CONDA_OVERRIDE_CUDA="${CUDA}" micromamba install -y -n base \
         -c conda-forge -c nvidia \
-        pip pandas matplotlib 'numpy<2.0.0' biopython scipy pdbfixer seaborn \
+        python=3.10 pip pandas matplotlib 'numpy<2.0.0' biopython scipy pdbfixer seaborn \
         libgfortran5 tqdm jupyter ffmpeg fsspec py3dmol \
         chex dm-haiku 'flax<0.10.0' dm-tree joblib ml-collections immutabledict optax \
         'jax>=0.4,<=0.6.0' 'jaxlib>=0.4,<=0.6.0=*cuda*' cuda-nvcc cudnn \
@@ -30,15 +32,27 @@ ARG MAMBA_DOCKERFILE_ACTIVATE=1
 # ColabDesign only (PyRosetta lives in the separate Rosetta image).
 RUN pip install --no-cache-dir "git+https://github.com/sokrypton/ColabDesign.git" --no-deps
 
+# Bake AlphaFold2 weights into the image (install_bindcraft.sh:110-123). Placed BEFORE
+# `COPY . /app` so editing application code does not invalidate this expensive ~5.3 GB layer.
+# ColabDesign reads <data_dir>/params/*.npz; af_params_dir defaults to /app, so weights go to /app/params.
+ARG AF2_PARAMS_URL=https://storage.googleapis.com/alphafold/alphafold_params_2022-12-06.tar
+RUN mkdir -p /app/params \
+    && wget -q -O /tmp/af2_params.tar "${AF2_PARAMS_URL}" \
+    && tar tf /tmp/af2_params.tar >/dev/null 2>&1 \
+    && tar -xf /tmp/af2_params.tar -C /app/params \
+    && rm -f /tmp/af2_params.tar \
+    && test -f /app/params/params_model_5_ptm.npz
+
 WORKDIR /app
 COPY . /app
 
 # dssp is used in-process by biopython_utils.calc_ss_percentage; DAlphaBall is unused here.
 RUN chmod +x /app/functions/dssp /app/docker/entrypoint-gpu.sh
 
-# Sanity: GPU stack imports, and the package loads in gpu mode WITHOUT pyrosetta.
+# Sanity: GPU stack imports, package loads in gpu mode WITHOUT pyrosetta, weights are baked in.
 RUN python -c "import jax, colabdesign; print('gpu image imports OK')" \
-    && BINDCRAFT_MODE=gpu python -c "import functions; print('gpu-mode package import OK')"
+    && BINDCRAFT_MODE=gpu python -c "import functions; print('gpu-mode package import OK')" \
+    && test -f /app/params/params_model_5_ptm.npz && echo "AF2 weights baked OK"
 
 ENV BINDCRAFT_MODE=gpu \
     ROSETTA_URL=http://rosetta:8000 \

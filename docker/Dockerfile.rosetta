@@ -14,8 +14,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # CPU-only deps needed by pyrosetta_utils / biopython_utils / generic_utils. No jax/colabdesign.
+# python=3.10 is REQUIRED: PyRosetta wheels are CPython-version-specific (cp310) and the
+# rossettacommons find-links only serves 3.10 — an unpinned newer Python breaks the pip install
+# (matches install_bindcraft.sh which creates the env with python=3.10).
 RUN micromamba install -y -n base -c conda-forge \
-        pip pandas 'numpy<2.0.0' scipy biopython libgfortran5 \
+        python=3.10 pip pandas 'numpy<2.0.0' scipy biopython libgfortran5 \
     && micromamba clean -a -y
 
 ARG MAMBA_DOCKERFILE_ACTIVATE=1
@@ -27,8 +30,9 @@ RUN pip install --no-cache-dir pyrosetta \
 WORKDIR /app
 COPY . /app
 
-# Both binaries are needed here: DAlphaBall by score_interface, dssp by calc_ss_percentage.
-RUN chmod +x /app/functions/dssp /app/functions/DAlphaBall.gcc
+# DAlphaBall is required by score_interface (BuriedUnsatHbonds). dssp is not used by any of the
+# RPC functions but is harmless to keep executable.
+RUN chmod +x /app/functions/DAlphaBall.gcc /app/functions/dssp
 
 # Sanity: PyRosetta imports and the package loads in rosetta mode WITHOUT jax.
 RUN python -c "import pyrosetta; print('rosetta image imports OK')" \

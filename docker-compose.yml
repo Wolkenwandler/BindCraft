@@ -64,13 +64,12 @@ services:
       BINDCRAFT_MODE: gpu
       ROSETTA_URL: http://rosetta:8000
       QUEUE: /workspace/queue
-      PARAMS_DIR: /app/params
       DEFAULT_FILTERS: /app/settings_filters/default_filters.json
       DEFAULT_ADVANCED: /app/settings_advanced/default_4stage_multimer.json
       EXIT_WHEN_EMPTY: ${EXIT_WHEN_EMPTY:-1}
       IDLE_POLL: ${IDLE_POLL:-15}
     volumes:
-      - params:/app/params
+      # AF2 weights are baked into the image (/app/params); only the shared workspace is mounted.
       - workspace:/workspace
       - ./batch_inputs:/batch_inputs:ro
     shm_size: "8gb"
@@ -94,5 +93,4 @@ services:
     restart: "no"
 
 volumes:
-  params:
   workspace:

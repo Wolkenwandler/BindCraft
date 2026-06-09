@@ -3,7 +3,7 @@ name: docker-build
 # Builds the two BindCraft images and pushes them directly to Docker Hub.
 # Conventions follow Common_project/.github/workflows/docker-publish.yml:
 #   - login via secrets.DOCKER_USERNAME / secrets.DOCKER_PASSWORD
-#   - aggressive disk cleanup (compute image is large: CUDA + jax + pyrosetta)
+#   - aggressive disk cleanup (gpu image is large: CUDA + jax + ~5.3GB AF2 weights baked in)
 #   - buildx + GHA layer cache
 #
 # Images pushed:
@@ -13,6 +13,8 @@ name: docker-build
 #
 # NOTE: GitHub runners have NO GPU. CI only BUILDS/PUSHES images; run the pipeline
 # on a GPU host with `docker compose up` (see README-docker.md).
+# The gpu image downloads ~5.3GB of AF2 weights during build (network required) and the
+# resulting image is ~10GB+; the disk-cleanup step below makes room on the runner.
 
 on:
   push:
