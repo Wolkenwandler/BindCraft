@@ -117,3 +117,72 @@ docker run --rm bindcraft-orchestrator:local python -c "import pandas; print('ok
 # GPU 可见(需 nvidia-container-toolkit)
 docker run --rm --gpus all bindcraft-gpu:local python -c "import jax; print(jax.devices())"
 ```
+
+## 构建后测试
+
+镜像构建好后,按下面四级逐步验证。**Level 1–2 不需要 GPU**,可在任意机器上确认三镜像拆分与 RPC 边界正确;Level 3–4 需要 GPU。
+
+### Level 1 — 依赖隔离自检(无 GPU)
+
+每个镜像构建时已内置 `RUN ... import functions` 自检;若 `docker build` 成功即说明三态导入(local/gpu/rosetta)无误。可随时复跑上面"本地验证"里的导入命令,确认:
+- gpu 镜像有 jax/colabdesign、**无 pyrosetta**;
+- rosetta 镜像有 pyrosetta、能在 `BINDCRAFT_MODE=rosetta` 下导入 `functions`(**不拉 jax**);
+- orchestrator 仅 pandas。
+
+### Level 2 — Rosetta RPC 边界(无 GPU,关键)
+
+这是三镜像拆分最核心的新增链路:GPU 进程 → HTTP → Rosetta 服务,PDB 经共享卷交接。一条命令端到端验证(启动 rosetta 服务、`/health`、用内置 `example/PDL1.pdb` 真跑一次 `pr_relax`、校验产物,然后清理):
+
+```bash
+docker compose build            # 或拉取镜像并在 .env 设置 *_IMAGE
+bash docker/smoke_test.sh
+```
+
+脚本输出 `summary: N passed, 0 failed` 即通过。它覆盖了依赖隔离 + `pr_relax` over HTTP 的真实往返,**不需要 GPU**——是验证本次重构是否正确最快、最有价值的一步。
+
+### Level 3 — GPU 可见性(需 GPU)
+
+```bash
+docker run --rm --gpus all bindcraft-gpu:local python -c "import jax; print(jax.devices())"
+# 期望打印包含 gpu/cuda 的设备列表;若为空,检查宿主 nvidia-container-toolkit。
+```
+
+### Level 4 — 端到端批量冒烟(需 GPU,较慢)
+
+用内置的精简靶标(`docker/examples/PDL1_smoke.json`,只求 1 个最终设计、binder 长度很短)跑通完整链路:
+
+```bash
+mkdir -p batch_inputs
+cp docker/examples/PDL1_smoke.json batch_inputs/
+
+# 用无过滤器加快出结果(可选,通过 DEFAULT_FILTERS 覆盖)
+WORKERS=1 DEFAULT_FILTERS=/app/settings_filters/no_filters.json docker compose up --build
+```
+
+期间应观察到:
+1. `rosetta` 服务 healthy;
+2. `gpu-worker` 下载 AF2 权重(首次)、认领 `PDL1_smoke.json`、`bindcraft.py` 启动设计循环;
+3. 日志里 relax/score 阶段经 rosetta 服务执行(不在 gpu 容器内导入 pyrosetta);
+4. 产物落到 workspace 卷 `designs/PDL1_smoke/`;
+5. `orchestrator` 打印每靶汇总并生成 `/workspace/combined_final_stats.csv`。
+
+结束后:
+```bash
+docker compose down                      # 停掉常驻的 rosetta 服务
+# 查看队列处理情况与日志
+docker run --rm -v bindcraft_workspace:/w alpine sh -c "ls -R /w/queue && echo '---' && tail -n 40 /w/queue/logs/*.log"
+# 导出产物
+docker run --rm -v bindcraft_workspace:/w -v "$PWD/out":/out alpine cp -r /w/designs /out/
+```
+
+> 提示:冒烟跑只为验证链路连通,不代表能产出合格 binder(真实运行常需数百~数千条 trajectory)。若只想验证"重构没破坏科学逻辑",Level 2 + Level 4 的链路连通性即足够;严格的科学回归应在单机 `local` 模式(不设 `BINDCRAFT_MODE`)与拆分模式间对比同一 seed 的输出。
+
+### 常见排查
+
+| 现象 | 排查 |
+|------|------|
+| `gpu-worker` 卡在 "waiting for Rosetta service" | `docker compose logs rosetta`;确认 healthcheck 通过、`ROSETTA_URL=http://rosetta:8000` |
+| RPC 报 `FileNotFound` | target 的 `design_path` 未在 `/workspace` 下,或 rosetta 与 gpu-worker 未挂同一 workspace 卷 |
+| rosetta 启动报 dalphaball/dssp 相关错误 | 确认 `Dockerfile.rosetta` 里两个二进制已 `chmod +x`、`DALPHABALL_PATH` 正确 |
+| 多 worker 时 relax 很慢 | 提高 `ROSETTA_REPLICAS`(PyRosetta 单进程内串行,靠多副本并发) |
+
