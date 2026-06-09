@@ -1,0 +1,9 @@
+{
+    "design_path": "/workspace/designs/PDL1_smoke/",
+    "binder_name": "PDL1smoke",
+    "starting_pdb": "/app/example/PDL1.pdb",
+    "chains": "A",
+    "target_hotspot_residues": "56",
+    "lengths": [70, 90],
+    "number_of_final_designs": 1
+}
