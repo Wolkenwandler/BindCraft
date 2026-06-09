@@ -4,7 +4,6 @@
 ### Import dependencies
 import os
 import json
-import jax
 import shutil
 import zipfile
 import random
@@ -197,6 +196,7 @@ def load_helicity(advanced_settings):
 
 # Report JAX-capable devices
 def check_jax_gpu():
+    import jax  # local import: keeps jax out of CPU-only (e.g. Rosetta service) environments
     devices = jax.devices()
 
     has_gpu = any(device.platform == 'gpu' for device in devices)

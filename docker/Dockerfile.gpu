@@ -1,0 +1,52 @@
+# syntax=docker/dockerfile:1
+###############################################################################
+# BindCraft GPU image: jax + colabdesign + biopython (NO PyRosetta).
+# Runs the design loop (bindcraft.py) in BINDCRAFT_MODE=gpu, forwarding all
+# Rosetta calls (relax/score/align/rmsd) over HTTP to the bindcraft-rosetta service.
+#
+# AF2 weights (~5.3 GB) are downloaded at runtime onto the mounted `params` volume.
+# Build needs no GPU; running needs a GPU + nvidia-container-toolkit on the host.
+###############################################################################
+FROM mambaorg/micromamba:1.5-jammy
+
+ARG CUDA=12.4
+USER root
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        wget git ca-certificates tar procps \
+    && rm -rf /var/lib/apt/lists/*
+
+# conda packages (install_bindcraft.sh:66-78), CUDA-enabled jaxlib. No PyRosetta here.
+RUN CONDA_OVERRIDE_CUDA="${CUDA}" micromamba install -y -n base \
+        -c conda-forge -c nvidia \
+        pip pandas matplotlib 'numpy<2.0.0' biopython scipy pdbfixer seaborn \
+        libgfortran5 tqdm jupyter ffmpeg fsspec py3dmol \
+        chex dm-haiku 'flax<0.10.0' dm-tree joblib ml-collections immutabledict optax \
+        'jax>=0.4,<=0.6.0' 'jaxlib>=0.4,<=0.6.0=*cuda*' cuda-nvcc cudnn \
+    && micromamba clean -a -y
+
+ARG MAMBA_DOCKERFILE_ACTIVATE=1
+
+# ColabDesign only (PyRosetta lives in the separate Rosetta image).
+RUN pip install --no-cache-dir "git+https://github.com/sokrypton/ColabDesign.git" --no-deps
+
+WORKDIR /app
+COPY . /app
+
+# dssp is used in-process by biopython_utils.calc_ss_percentage; DAlphaBall is unused here.
+RUN chmod +x /app/functions/dssp /app/docker/entrypoint-gpu.sh
+
+# Sanity: GPU stack imports, and the package loads in gpu mode WITHOUT pyrosetta.
+RUN python -c "import jax, colabdesign; print('gpu image imports OK')" \
+    && BINDCRAFT_MODE=gpu python -c "import functions; print('gpu-mode package import OK')"
+
+ENV BINDCRAFT_MODE=gpu \
+    ROSETTA_URL=http://rosetta:8000 \
+    PARAMS_DIR=/app/params \
+    QUEUE=/workspace/queue \
+    DEFAULT_FILTERS=/app/settings_filters/default_filters.json \
+    DEFAULT_ADVANCED=/app/settings_advanced/default_4stage_multimer.json \
+    EXIT_WHEN_EMPTY=1
+
+ENTRYPOINT ["/usr/local/bin/_entrypoint.sh", "/app/docker/entrypoint-gpu.sh"]
+CMD ["python", "-u", "/app/docker/worker.py"]

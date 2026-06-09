@@ -1,0 +1,24 @@
+# syntax=docker/dockerfile:1
+###############################################################################
+# BindCraft orchestrator image (lightweight): batch enqueue + monitor + aggregate.
+# Deliberately has NO jax and NO pyrosetta — a separate, independently buildable
+# and modifiable environment from the compute image.
+###############################################################################
+FROM python:3.10-slim
+
+WORKDIR /app
+
+# Only what aggregation/monitoring needs. (stdlib csv/json are used for aggregation;
+# pandas/numpy kept available for richer post-processing if you extend orchestrator.py.)
+RUN pip install --no-cache-dir pandas numpy
+
+COPY docker/orchestrator.py /app/orchestrator.py
+
+ENV BATCH_IN=/batch_inputs \
+    QUEUE=/workspace/queue \
+    WORKSPACE=/workspace \
+    POLL=20 \
+    ENQUEUE=1 \
+    WAIT=1
+
+ENTRYPOINT ["python", "-u", "/app/orchestrator.py"]

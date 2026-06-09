@@ -1,0 +1,98 @@
+# BindCraft single-machine Docker Compose — THREE images cooperating over a shared volume:
+#   orchestrator  -> enqueues batch inputs, monitors, aggregates results        (no GPU, no jax/pyrosetta)
+#   rosetta       -> HTTP service running PyRosetta relax/score/align            (CPU only, no jax)
+#   gpu-worker    -> runs bindcraft.py design loop, calls rosetta over HTTP      (GPU, jax/colabdesign)
+#
+# PDB files are exchanged via the shared `workspace` volume, mounted at /workspace in BOTH
+# rosetta and gpu-worker so the file paths passed in RPC calls resolve identically.
+#
+# Usage:
+#   1. Put target settings JSONs in ./batch_inputs/ (schema = settings_target/*.json).
+#      Each "design_path" must point inside /workspace, e.g. "/workspace/designs/PDL1/".
+#   2. (optional) .env:  WORKERS=1  ROSETTA_REPLICAS=1  CUDA=12.4
+#   3. docker compose up --build
+#   4. When the orchestrator finishes aggregating, stop the long-running service: docker compose down
+#
+# Prebuilt images from Docker Hub: set GPU_IMAGE / ROSETTA_IMAGE / ORCH_IMAGE in .env, e.g.
+#   GPU_IMAGE=<DOCKER_USERNAME>/bindcraft:gpu
+#   ROSETTA_IMAGE=<DOCKER_USERNAME>/bindcraft:rosetta
+#   ORCH_IMAGE=<DOCKER_USERNAME>/bindcraft:orchestrator
+#
+# GPU NOTE: needs nvidia-container-toolkit on the host. One binder complex can need ~32 GB VRAM
+# (see README); on a single GPU keep WORKERS=1.
+
+services:
+  rosetta:
+    image: ${ROSETTA_IMAGE:-bindcraft-rosetta:local}
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.rosetta
+    deploy:
+      replicas: ${ROSETTA_REPLICAS:-1}
+    environment:
+      ROSETTA_PORT: 8000
+      DALPHABALL_PATH: /app/functions/DAlphaBall.gcc
+    volumes:
+      - workspace:/workspace        # same mount path as gpu-worker — RPC passes paths, not bytes
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; urllib.request.urlopen('http://localhost:8000/health',timeout=5)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+
+  gpu-worker:
+    image: ${GPU_IMAGE:-bindcraft-gpu:local}
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.gpu
+      args:
+        CUDA: ${CUDA:-12.4}
+    depends_on:
+      rosetta:
+        condition: service_healthy
+    deploy:
+      replicas: ${WORKERS:-1}
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      BINDCRAFT_MODE: gpu
+      ROSETTA_URL: http://rosetta:8000
+      QUEUE: /workspace/queue
+      PARAMS_DIR: /app/params
+      DEFAULT_FILTERS: /app/settings_filters/default_filters.json
+      DEFAULT_ADVANCED: /app/settings_advanced/default_4stage_multimer.json
+      EXIT_WHEN_EMPTY: ${EXIT_WHEN_EMPTY:-1}
+      IDLE_POLL: ${IDLE_POLL:-15}
+    volumes:
+      - params:/app/params
+      - workspace:/workspace
+      - ./batch_inputs:/batch_inputs:ro
+    shm_size: "8gb"
+    restart: "no"
+
+  orchestrator:
+    image: ${ORCH_IMAGE:-bindcraft-orchestrator:local}
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.orchestrator
+    environment:
+      BATCH_IN: /batch_inputs
+      QUEUE: /workspace/queue
+      WORKSPACE: /workspace
+      POLL: ${POLL:-20}
+      ENQUEUE: ${ENQUEUE:-1}
+      WAIT: ${WAIT:-1}
+    volumes:
+      - workspace:/workspace
+      - ./batch_inputs:/batch_inputs:ro
+    restart: "no"
+
+volumes:
+  params:
+  workspace:

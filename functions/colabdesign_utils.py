@@ -14,7 +14,10 @@ from colabdesign.af.alphafold.common import residue_constants
 from colabdesign.af.loss import get_ptm, mask_loss, get_dgram_bins, _get_con_loss
 from colabdesign.shared.utils import copy_dict
 from .biopython_utils import hotspot_residues, calculate_clash_score, calc_ss_percentage, calculate_percentages
-from .pyrosetta_utils import pr_relax, align_pdbs
+if os.environ.get("BINDCRAFT_MODE") == "gpu":
+    from .rosetta_client import pr_relax, align_pdbs
+else:
+    from .pyrosetta_utils import pr_relax, align_pdbs
 from .generic_utils import update_failures
 
 # hallucinate a binder

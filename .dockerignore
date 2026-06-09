@@ -1,0 +1,16 @@
+# Keep the build context small and avoid baking large/irrelevant files into images.
+.git
+.github
+*.png
+*.tar
+params/
+batch_inputs/
+**/__pycache__/
+*.pyc
+# BindCraft design outputs (if any were produced locally)
+**/Trajectory/
+**/Accepted/
+**/Rejected/
+**/MPNN/
+*.md
+!README.md

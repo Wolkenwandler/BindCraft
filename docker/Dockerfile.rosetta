@@ -1,0 +1,44 @@
+# syntax=docker/dockerfile:1
+###############################################################################
+# BindCraft Rosetta image: PyRosetta + DAlphaBall + dssp + biopython (NO jax).
+# Runs rosetta_service.py — a small HTTP service exposing pr_relax / score_interface
+# / unaligned_rmsd / align_pdbs. The GPU workers call it; PDBs are exchanged via the
+# shared /workspace volume (mounted at the same path).
+###############################################################################
+FROM mambaorg/micromamba:1.5-jammy
+
+USER root
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates procps \
+    && rm -rf /var/lib/apt/lists/*
+
+# CPU-only deps needed by pyrosetta_utils / biopython_utils / generic_utils. No jax/colabdesign.
+RUN micromamba install -y -n base -c conda-forge \
+        pip pandas 'numpy<2.0.0' scipy biopython libgfortran5 \
+    && micromamba clean -a -y
+
+ARG MAMBA_DOCKERFILE_ACTIVATE=1
+
+# PyRosetta (install_bindcraft.sh:106).
+RUN pip install --no-cache-dir pyrosetta \
+        --find-links https://west.rosettacommons.org/pyrosetta/quarterly/release.cxx11thread.serialization
+
+WORKDIR /app
+COPY . /app
+
+# Both binaries are needed here: DAlphaBall by score_interface, dssp by calc_ss_percentage.
+RUN chmod +x /app/functions/dssp /app/functions/DAlphaBall.gcc
+
+# Sanity: PyRosetta imports and the package loads in rosetta mode WITHOUT jax.
+RUN python -c "import pyrosetta; print('rosetta image imports OK')" \
+    && BINDCRAFT_MODE=rosetta python -c "import functions; print('rosetta-mode package import OK')"
+
+ENV BINDCRAFT_MODE=rosetta \
+    PYTHONPATH=/app \
+    ROSETTA_PORT=8000 \
+    DALPHABALL_PATH=/app/functions/DAlphaBall.gcc
+
+EXPOSE 8000
+ENTRYPOINT ["/usr/local/bin/_entrypoint.sh"]
+CMD ["python", "-u", "/app/docker/rosetta_service.py"]
