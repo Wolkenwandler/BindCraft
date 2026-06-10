@@ -35,7 +35,10 @@ services:
     volumes:
       - workspace:/workspace        # same mount path as gpu-worker — RPC passes paths, not bytes
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request,sys; urllib.request.urlopen('http://localhost:8000/health',timeout=5)"]
+      # absolute path: the micromamba rosetta image only puts `python` on PATH after
+      # _entrypoint.sh activation, which healthcheck exec does NOT run — bare `python`
+      # would always fail and the service would never become healthy.
+      test: ["CMD", "/opt/conda/bin/python", "-c", "import urllib.request,sys; urllib.request.urlopen('http://localhost:8000/health',timeout=5)"]
       interval: 10s
       timeout: 5s
       retries: 12
