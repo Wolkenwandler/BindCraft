@@ -36,6 +36,13 @@ COPY . /app
 # RPC functions but is harmless to keep executable.
 RUN chmod +x /app/functions/DAlphaBall.gcc /app/functions/dssp
 
+# LD_LIBRARY_PATH=/opt/conda/lib is REQUIRED: DAlphaBall.gcc is a precompiled external binary that
+# PyRosetta exec()s during score_interface, and it dynamically links libgfortran.so.5 (shipped by
+# the conda libgfortran5 pkg under /opt/conda/lib). micromamba activation does NOT add that dir to
+# LD_LIBRARY_PATH, so without this the binary aborts with "libgfortran.so.5: cannot open shared
+# object file" and score_interface raises UtilityExitException. pr_relax does not use DAlphaBall,
+# so this only surfaces on the first /score_interface call (smoke_test.sh exercises pr_relax only).
+
 # Sanity: PyRosetta imports and the package loads in rosetta mode WITHOUT jax.
 RUN python -c "import pyrosetta; print('rosetta image imports OK')" \
     && BINDCRAFT_MODE=rosetta python -c "import functions; print('rosetta-mode package import OK')"
@@ -43,7 +50,8 @@ RUN python -c "import pyrosetta; print('rosetta image imports OK')" \
 ENV BINDCRAFT_MODE=rosetta \
     PYTHONPATH=/app \
     ROSETTA_PORT=8000 \
-    DALPHABALL_PATH=/app/functions/DAlphaBall.gcc
+    DALPHABALL_PATH=/app/functions/DAlphaBall.gcc \
+    LD_LIBRARY_PATH=/opt/conda/lib
 
 EXPOSE 8000
 ENTRYPOINT ["/usr/local/bin/_entrypoint.sh"]

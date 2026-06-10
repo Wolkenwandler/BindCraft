@@ -20,7 +20,13 @@ multiple replicas of this service behind the compose service DNS.
 import os
 import json
 import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+# NOTE: a single-threaded HTTPServer is used on purpose. PyRosetta movers (e.g. FastRelax)
+# segfault when executed off the main thread in the current PyRosetta build, so a
+# ThreadingHTTPServer (one worker thread per request) crashes the whole service on the
+# first /pr_relax call. Handling requests synchronously on the main thread avoids this,
+# and costs nothing: PyRosetta calls are already serialised by _LOCK below, and throughput
+# is scaled by running multiple service replicas (see ROSETTA_REPLICAS / compose DNS).
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pyrosetta as pr
 
@@ -88,7 +94,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     print(f"[rosetta] PyRosetta initialised (dalphaball={DALPHABALL_PATH}); listening on :{PORT}", flush=True)
-    ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
+    HTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
 
 
 if __name__ == "__main__":
