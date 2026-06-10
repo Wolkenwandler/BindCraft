@@ -1,6 +1,6 @@
 name: docker-build
 
-# Builds the two BindCraft images and pushes them directly to Docker Hub.
+# Builds the three BindCraft images and pushes them directly to Docker Hub.
 # Conventions follow Common_project/.github/workflows/docker-publish.yml:
 #   - login via secrets.DOCKER_USERNAME / secrets.DOCKER_PASSWORD
 #   - aggressive disk cleanup (gpu image is large: CUDA + jax + ~5.3GB AF2 weights baked in)
@@ -19,8 +19,18 @@ name: docker-build
 on:
   push:
     branches: [main]
-    tags: ["v*"]
-  workflow_dispatch:
+    # Only run when files that actually affect the images change. The gpu/rosetta images
+    # COPY the whole repo, so app code + settings + the binaries matter, not just docker/.
+    paths:
+      - 'docker/**'
+      - 'functions/**'
+      - 'bindcraft.py'
+      - 'settings_advanced/**'
+      - 'settings_filters/**'
+      - 'settings_target/**'
+      - 'example/**'
+      - '.github/workflows/docker-build.yml'
+  workflow_dispatch:   # manual full build (e.g. for releases), ignores the paths filter
 
 jobs:
   build-and-push:
