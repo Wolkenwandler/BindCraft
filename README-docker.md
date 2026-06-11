@@ -187,3 +187,329 @@ docker run --rm -v bindcraft_workspace:/w -v "$PWD/out":/out alpine cp -r /w/des
 | rosetta 启动报 dalphaball/dssp 相关错误 | 确认 `Dockerfile.rosetta` 里两个二进制已 `chmod +x`、`DALPHABALL_PATH` 正确 |
 | 多 worker 时 relax 很慢 | 提高 `ROSETTA_REPLICAS`(PyRosetta 单进程内串行,靠多副本并发) |
 
+## API / MCP 远程调用
+
+GPU 镜像支持三种运行模式,通过 `START_MODE` 环境变量切换:
+
+| START_MODE | 说明 | 端口 |
+|------------|------|------|
+| `worker` (默认) | 原有批量处理模式,向后兼容 | - |
+| `api` | FastAPI 服务,包装核心设计管线 | 42001 |
+| `mcp` | FastMCP 服务,暴露 MCP 工具供远程客户端调用 | 32210 |
+| `all` | 同一容器内同时启动 API + MCP | 42001 + 32210 |
+
+### 架构
+
+```
+┌──────────────────────┐     HTTP      ┌─────────────────────┐     MCP/HTTP     ┌──────────────────────┐
+│  functions/*.py      │◀──────────────│  api_bindcraft.py   │◀────────────────│  server_bindcraft.py │
+│  (AF2/MPNN/Rosetta)  │              │  FastAPI :42001     │                 │  FastMCP :32210      │
+└──────────────────────┘              └─────────────────────┘                 └──────────────────────┘
+```
+
+API 层直接调用 BindCraft 核心函数(`binder_hallucination`, `mpnn_gen_sequence`, `predict_binder_complex` 等);MCP 层定义 tool,内部通过 HTTP 调用 API 层。Rosetta 调用仍然走 HTTP 转发到 Rosetta 服务容器。
+
+### 启动方式
+
+**前提**: Rosetta 服务已运行,且 API 容器能访问它(同网络 + 共享卷)。
+
+```bash
+# 1. 启动 Rosetta 服务
+docker run -d --name rosetta --network host \
+  -v /path/to/workspace:/workspace \
+  ai4science/bindcraft:rosetta
+
+# 2. 启动 API + MCP (推荐)
+docker run -d --name bindcraft-api --network host --gpus all \
+  -v /path/to/workspace:/workspace \
+  -e START_MODE=all \
+  -e ROSETTA_URL=http://localhost:8000 \
+  ai4science/bindcraft:gpu
+
+# 或仅启动 API
+docker run -d --name bindcraft-api --network host --gpus all \
+  -v /path/to/workspace:/workspace \
+  -e START_MODE=api \
+  -e ROSETTA_URL=http://localhost:8000 \
+  ai4science/bindcraft:gpu
+```
+
+**重要**: PDB 文件通过共享卷传递,Roestta 和 GPU 容器必须将 workspace 挂载到相同路径(推荐 `/workspace`),且设计产物的 `design_path` 需在 `/workspace` 下。
+
+### API 端点
+
+#### `GET /health`
+
+健康检查,返回 GPU 可用性和服务状态。
+
+```bash
+curl http://localhost:42001/health
+```
+
+响应:
+```json
+{
+  "status": "healthy",
+  "service": "BindCraft API",
+  "gpu_available": true,
+  "gpu_devices": ["cuda:0", "cuda:1"],
+  "bindcraft_mode": "gpu"
+}
+```
+
+#### `POST /api/hallucinate_binder`
+
+运行 binder backbone hallucination(仅 AF2 反向传播,不含 MPNN 重设计)。
+
+```bash
+curl -X POST http://localhost:42001/api/hallucinate_binder \
+  -H "Content-Type: application/json" \
+  -d '{
+    "binder_name": "MyBinder",
+    "starting_pdb": "/workspace/input_pdbs/target.pdb",
+    "chains": "A",
+    "target_hotspot_residues": "56,120",
+    "length": 80,
+    "seed": 42,
+    "design_path": "/workspace/designs/test/"
+  }'
+```
+
+请求参数:
+
+| 参数 | 类型 | 必需 | 说明 |
+|------|------|------|------|
+| `binder_name` | string | 是 | 设计名称前缀 |
+| `starting_pdb` | string | 是 | 靶标蛋白 PDB 文件路径(需在共享卷内) |
+| `chains` | string | 是 | 靶标链 ID,如 `"A"` |
+| `target_hotspot_residues` | string | 是 | 热点残基编号,逗号分隔,如 `"56,120"` |
+| `length` | int | 是 | binder 长度(残基数) |
+| `seed` | int | 否 | 随机种子(不指定则随机生成) |
+| `design_path` | string | 是 | 输出目录(需在共享卷内) |
+| `advanced_settings` | dict | 否 | 高级协议参数覆盖 |
+
+响应:
+```json
+{
+  "status": "success",
+  "design_name": "MyBinder_l80_s42",
+  "trajectory_pdb": "/workspace/designs/test/Trajectory/MyBinder_l80_s42.pdb",
+  "terminated": "",
+  "sequence": "SEEARDRFLRKMKPVFEEHVWRFRQMPNPTD...",
+  "metrics": {
+    "plddt": 0.91,
+    "ptm": 0.85,
+    "i_ptm": 0.78,
+    "pae": 0.18,
+    "i_pae": 0.15,
+    "loss": 4.52,
+    "helix": 1.02
+  },
+  "elapsed_seconds": 330.8
+}
+```
+
+#### `POST /api/predict_complex`
+
+对给定的 binder 序列预测其与靶标蛋白的复合物结构(AF2 多模板预测 + Rosetta FastRelax)。
+
+```bash
+curl -X POST http://localhost:42001/api/predict_complex \
+  -H "Content-Type: application/json" \
+  -d '{
+    "binder_sequence": "SEEARDRFLRK...",
+    "target_pdb": "/workspace/input_pdbs/target.pdb",
+    "target_chain": "A",
+    "binder_length": 80,
+    "trajectory_pdb": "/workspace/designs/test/Trajectory/MyBinder_l80_s42.pdb",
+    "design_path": "/workspace/designs/test/",
+    "design_name": "pred_1"
+  }'
+```
+
+| 参数 | 类型 | 必需 | 说明 |
+|------|------|------|------|
+| `binder_sequence` | string | 是 | Binder 氨基酸序列(单字母大写) |
+| `target_pdb` | string | 是 | 靶标蛋白 PDB 路径 |
+| `target_chain` | string | 是 | 靶标链 ID |
+| `binder_length` | int | 是 | Binder 残基数 |
+| `trajectory_pdb` | string | 是 | Hallucination 产生的 trajectory PDB 路径(用作模板) |
+| `design_path` | string | 是 | 输出目录 |
+| `design_name` | string | 是 | 预测名称 |
+| `advanced_settings` | dict | 否 | AF2 预测参数覆盖 |
+| `filters` | dict | 否 | 逐模型过滤阈值 |
+
+响应:
+```json
+{
+  "status": "success",
+  "design_name": "pred_1",
+  "sequence": "SEEARDRFLRK...",
+  "models": {
+    "1": {
+      "pLDDT": 0.79,
+      "pTM": 0.64,
+      "i_pTM": 0.25,
+      "pAE": 0.46,
+      "i_pAE": 0.65,
+      "pdb": "/workspace/designs/test/MPNN/pred_1_model1.pdb",
+      "relaxed_pdb": "/workspace/designs/test/MPNN/Relaxed/pred_1_model1.pdb"
+    },
+    "2": {
+      "pLDDT": 0.85,
+      "pTM": 0.58,
+      "i_pTM": 0.06,
+      "pAE": 0.61,
+      "i_pAE": 0.91,
+      "pdb": "/workspace/designs/test/MPNN/pred_1_model2.pdb",
+      "relaxed_pdb": "/workspace/designs/test/MPNN/Relaxed/pred_1_model2.pdb"
+    }
+  }
+}
+```
+
+#### `POST /api/run_design`
+
+运行完整的 BindCraft 设计管线(hallucination → relax → score → MPNN → validate → filter),循环直至产出足够的合格设计。
+
+```bash
+curl -X POST http://localhost:42001/api/run_design \
+  -H "Content-Type: application/json" \
+  -d '{
+    "target_settings": {
+      "design_path": "/workspace/designs/PDL1/",
+      "binder_name": "PDL1",
+      "starting_pdb": "/workspace/input_pdbs/PDL1.pdb",
+      "chains": "A",
+      "target_hotspot_residues": "56",
+      "lengths": [65, 150],
+      "number_of_final_designs": 10
+    },
+    "filters": {"pLDDT": 0.85, "i_pTM": 0.70}
+  }'
+```
+
+| 参数 | 类型 | 必需 | 说明 |
+|------|------|------|------|
+| `target_settings` | dict | 是 | 靶标设置,结构同 `settings_target/*.json` |
+| `advanced_settings` | dict | 否 | 高级协议参数(不提供则用默认 4-stage multimer) |
+| `filters` | dict | 否 | 过滤阈值(不提供则用默认;设 `null` 禁用某项过滤) |
+
+> **注意**: 完整设计管线可能运行数小时。建议先用 `hallucinate_binder` + `predict_complex` 分步调试参数,确认无误后再用 `run_design` 批量生产。
+
+### MCP 工具
+
+MCP 服务(FastMCP, `streamable-http` 传输)提供 4 个工具,可用任意 MCP 客户端调用。
+
+MCP 服务端点: `http://<host>:32210/mcp`
+
+#### 工具列表
+
+| 工具 | 说明 | 超时 |
+|------|------|------|
+| `bindcraft_health` | 健康检查 + GPU 状态 | 10s |
+| `run_binder_design` | 完整设计管线 | 24h |
+| `hallucinate_binder` | Binder backbone hallucination | 2h |
+| `predict_binder_complex` | 复合物结构预测 | 2h |
+
+#### MCP 客户端示例 (Python)
+
+```python
+import asyncio, json
+from mcp.client.streamable_http import streamablehttp_client
+from mcp import ClientSession
+
+MCP_URL = "http://localhost:32210/mcp"
+
+async def main():
+    transport = streamablehttp_client(MCP_URL)
+    read, write, get_session_id = await transport.__aenter__()
+    session_ctx = ClientSession(read, write)
+    session = await session_ctx.__aenter__()
+    await session.initialize()
+
+    # 健康检查
+    response = await session.call_tool("bindcraft_health", arguments={})
+    print(response.content[0].text)
+
+    # Hallucinate backbone
+    response = await session.call_tool(
+        "hallucinate_binder",
+        arguments={
+            "binder_name": "test",
+            "starting_pdb": "/workspace/input_pdbs/PDL1.pdb",
+            "chains": "A",
+            "target_hotspot_residues": "56",
+            "length": 80,
+            "seed": 42,
+            "design_path": "/workspace/designs/test/",
+        }
+    )
+    result = json.loads(response.content[0].text)
+    print(f"pLDDT: {result['metrics']['plddt']}")
+    trajectory_pdb = result["trajectory_pdb"]
+    sequence = result["sequence"]
+
+    # 预测复合物结构
+    response = await session.call_tool(
+        "predict_binder_complex",
+        arguments={
+            "binder_sequence": sequence,
+            "target_pdb": "/workspace/input_pdbs/PDL1.pdb",
+            "target_chain": "A",
+            "binder_length": 80,
+            "trajectory_pdb": trajectory_pdb,
+            "design_path": "/workspace/designs/test/",
+            "design_name": "predict_1",
+        }
+    )
+    result = json.loads(response.content[0].text)
+    for m, stats in result["models"].items():
+        print(f"Model {m}: pLDDT={stats['pLDDT']}, i_pTM={stats['i_pTM']}")
+
+    await session_ctx.__aexit__(None, None, None)
+    await transport.__aexit__(None, None, None)
+
+asyncio.run(main())
+```
+
+#### 在 Claude Code 中使用
+
+如果 MCP 服务部署在可通过 HTTP 访问的地址,可在 Claude Code 中配置为 MCP 工具:
+
+```json
+{
+  "mcpServers": {
+    "bindcraft": {
+      "type": "streamable-http",
+      "url": "http://<host>:32210/mcp"
+    }
+  }
+}
+```
+
+### 环境变量参考
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `START_MODE` | `worker` | 容器启动模式: `worker` / `api` / `mcp` / `all` |
+| `API_PORT` | `42001` | API 服务监听端口 |
+| `MCP_PORT` | `32210` | MCP 服务监听端口 |
+| `BINDCRAFT_API_URL` | `http://localhost:42001` | MCP 服务连接 API 的地址(仅 mcp 模式需要) |
+| `BINDCRAFT_MODE` | `gpu` | 依赖栈模式(gpu 镜像固定为 `gpu`) |
+| `ROSETTA_URL` | `http://rosetta:8000` | Rosetta 服务地址 |
+
+### 验证
+
+```bash
+# API 健康检查
+curl http://localhost:42001/health
+
+# 完整链路验证: Hallucination → Predict
+curl -X POST http://localhost:42001/api/hallucinate_binder \
+  -H "Content-Type: application/json" \
+  -d '{"binder_name":"smoke","starting_pdb":"/workspace/input_pdbs/target.pdb","chains":"A","target_hotspot_residues":"1","length":50,"seed":1,"design_path":"/workspace/smoke/"}'
+
+# 用输出的 trajectory_pdb 和 sequence 继续测试 predict_complex ...
+```
+

@@ -258,6 +258,33 @@ def _merge_filters(f: Optional[Dict]) -> Dict:
     return {**dict(_default_filters), **f}
 
 
+def _make_json_safe(obj: Any) -> Any:
+    """Recursively convert non-JSON-serializable objects (jax/numpy arrays, etc.) to Python types."""
+    import numpy as np
+    # Handle jax arrays (import lazily since jax may not be available in all modes)
+    try:
+        import jax.numpy as jnp
+        if isinstance(obj, jnp.ndarray):
+            obj = np.array(obj)
+    except Exception:
+        pass
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, (np.floating,)):
+        return float(obj)
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    if isinstance(obj, dict):
+        return {str(k): _make_json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_make_json_safe(v) for v in obj]
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    return obj
+
+
 # ==============================================================================
 # Core pipeline functions
 # ==============================================================================
@@ -819,19 +846,23 @@ async def api_hallucinate_binder(request: HallucinateRequest):
 
         elapsed = time.time() - start_time
         trajectory_metrics = copy_dict(trajectory._tmp["best"]["aux"]["log"])
-        trajectory_metrics = {k: round(v, 2) if isinstance(v, float) else v for k, v in trajectory_metrics.items()}
+        # Round floats in metrics for cleaner output
+        trajectory_metrics = {
+            k: round(float(v), 2) if isinstance(v, (float, np.floating, np.ndarray)) and np.ndim(v) == 0 else v
+            for k, v in trajectory_metrics.items()
+        }
         trajectory_sequence = trajectory.get_seq(get_best=True)[0]
 
-        return {
+        return _make_json_safe({
             "status": "success",
             "msg": "Binder hallucination完成",
             "design_name": design_name,
             "trajectory_pdb": trajectory_pdb if os.path.exists(trajectory_pdb) else None,
-            "terminated": trajectory.aux["log"]["terminate"],
+            "terminated": str(trajectory.aux["log"]["terminate"]),
             "sequence": trajectory_sequence,
             "metrics": trajectory_metrics,
             "elapsed_seconds": round(elapsed, 1),
-        }
+        })
 
     except Exception as e:
         traceback.print_exc()
@@ -915,13 +946,13 @@ async def api_predict_complex(request: PredictComplexRequest):
             pr_relax(complex_pdb, relaxed_pdb)
             stats['relaxed_pdb'] = relaxed_pdb
 
-        return {
+        return _make_json_safe({
             "status": "success",
             "msg": "复合物结构预测完成",
             "design_name": request.design_name,
             "sequence": binder_sequence,
             "models": prediction_stats,
-        }
+        })
 
     except Exception as e:
         traceback.print_exc()
