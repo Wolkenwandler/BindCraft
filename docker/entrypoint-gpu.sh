@@ -33,4 +33,31 @@ PY
   done
 fi
 
-exec "$@"
+# START_MODE controls which service this container runs.
+#   worker  (default) → original batch worker  (backward compatible)
+#   api               → FastAPI server only      (port 42001)
+#   mcp               → FastMCP server only      (port 32210, needs API server elsewhere)
+#   all               → API + MCP in one container
+START_MODE="${START_MODE:-worker}"
+echo "[entrypoint] START_MODE=${START_MODE}"
+
+case "${START_MODE}" in
+  api)
+    echo "[entrypoint] starting BindCraft API server on :${API_PORT:-42001}"
+    exec python -u /app/docker/api_bindcraft.py
+    ;;
+  mcp)
+    echo "[entrypoint] starting BindCraft MCP server on :${MCP_PORT:-32210}"
+    exec python -u /app/docker/server_bindcraft.py
+    ;;
+  all)
+    echo "[entrypoint] starting BindCraft API + MCP servers"
+    python -u /app/docker/api_bindcraft.py &
+    sleep 3
+    exec python -u /app/docker/server_bindcraft.py
+    ;;
+  worker|*)
+    echo "[entrypoint] starting worker (original batch mode)"
+    exec "$@"
+    ;;
+esac

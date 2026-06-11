@@ -32,6 +32,9 @@ ARG MAMBA_DOCKERFILE_ACTIVATE=1
 # ColabDesign only (PyRosetta lives in the separate Rosetta image).
 RUN pip install --no-cache-dir "git+https://github.com/sokrypton/ColabDesign.git" --no-deps
 
+# API server dependencies (FastAPI + FastMCP for remote calling support).
+RUN pip install --no-cache-dir fastapi uvicorn fastmcp
+
 # Bake AlphaFold2 weights into the image (install_bindcraft.sh:110-123). Placed BEFORE
 # `COPY . /app` so editing application code does not invalidate this expensive ~5.3 GB layer.
 # ColabDesign reads <data_dir>/params/*.npz; af_params_dir defaults to /app, so weights go to /app/params.
@@ -60,7 +63,10 @@ ENV BINDCRAFT_MODE=gpu \
     QUEUE=/workspace/queue \
     DEFAULT_FILTERS=/app/settings_filters/default_filters.json \
     DEFAULT_ADVANCED=/app/settings_advanced/default_4stage_multimer.json \
-    EXIT_WHEN_EMPTY=1
+    EXIT_WHEN_EMPTY=1 \
+    START_MODE=worker \
+    API_PORT=42001 \
+    MCP_PORT=32210
 
 ENTRYPOINT ["/usr/local/bin/_entrypoint.sh", "/app/docker/entrypoint-gpu.sh"]
 CMD ["python", "-u", "/app/docker/worker.py"]
